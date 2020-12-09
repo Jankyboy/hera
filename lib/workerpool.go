@@ -83,6 +83,8 @@ type WorkerPool struct {
 
 	// the actual list of workers
 	workers []*WorkerClient
+	// Throtle workers lifecycle
+	thr Throttler
 }
 
 // Init creates the pool by creating the workers and making all the initializations
@@ -98,6 +100,7 @@ func (pool *WorkerPool) Init(wType HeraWorkerType, size int, instID int, shardID
 	pool.desiredSize = size
 	pool.moduleName = moduleName
 	pool.workers = make([]*WorkerClient, size)
+	pool.thr = NewThrottler(uint32(GetConfig().MaxDbConnectsPerSec), fmt.Sprintf("%d_%d_%d", wType, shardID, instID))
 	for i := 0; i < size; i++ {
 		err := pool.spawnWorker(i)
 		if err != nil {
@@ -114,7 +117,7 @@ func (pool *WorkerPool) Init(wType HeraWorkerType, size int, instID int, shardID
 
 // spawnWorker starts a worker and spawn a routine waiting for the "ready" message
 func (pool *WorkerPool) spawnWorker(wid int) error {
-	worker := NewWorker(wid, pool.Type, pool.InstID, pool.ShardID, pool.moduleName)
+	worker := NewWorker(wid, pool.Type, pool.InstID, pool.ShardID, pool.moduleName, pool.thr)
 	er := worker.StartWorker()
 	if er != nil {
 		if logger.GetLogger().V(logger.Alert) {
@@ -629,7 +632,7 @@ func (pool *WorkerPool) Resize(newSize int) {
 		//
 		GetStateLog().PublishStateEvent(StateEvent{eType: WorkerResizeEvt, shardID: pool.ShardID, wType: pool.Type, instID: pool.InstID, newWSize: newSize})
 		for i := pool.currentSize; i < newSize; i++ {
-			worker := NewWorker(i, pool.Type, pool.InstID, pool.ShardID, pool.moduleName)
+			worker := NewWorker(i, pool.Type, pool.InstID, pool.ShardID, pool.moduleName, pool.thr)
 			er := worker.StartWorker()
 			if er != nil {
 				if logger.GetLogger().V(logger.Alert) {
@@ -766,7 +769,7 @@ func (pool *WorkerPool) checkWorkerLifespan() {
 		pool.poolCond.L.Lock()
 		for i := 0; i < pool.currentSize; i++ {
 			if (pool.workers[i] != nil) && (pool.workers[i].exitTime != 0) && (pool.workers[i].exitTime <= now) {
-				if pool.GetHealthyWorkersCount() < (int32(pool.desiredSize)*90/100) { // Should it be a config value
+				if pool.GetHealthyWorkersCount() < (int32(pool.desiredSize*GetConfig().MaxDesiredHealthyWorkerPct/100)) { // Should it be a config value
 					if logger.GetLogger().V(logger.Alert) {
 						logger.GetLogger().Log(logger.Alert, "Non Healthy Worker found in pool, module_name=",pool.moduleName,"shard_id=",pool.ShardID, "HEALTHY worker Count=",pool.GetHealthyWorkersCount(),"TotalWorkers:", pool.desiredSize)
 					}
